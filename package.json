@@ -1,0 +1,16 @@
+{
+  "name": "canvas-jupyterhub-rewriter",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "fflate": "^0.8.2"
+  },
+  "devDependencies": {
+    "vite": "^5.2.0"
+  }
+}
