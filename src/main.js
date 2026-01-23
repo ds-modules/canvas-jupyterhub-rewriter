@@ -1,5 +1,5 @@
-import {unzipBuffer, zipFiles} from './zip.js';
-import {rewriteText, detectFromZipMap} from './rewrite.js';
+import {scanZipBlob, rewriteZipBlob} from './zip.js';
+import {rewriteText} from './rewrite.js';
 
 const fileInput = document.getElementById('file');
 const scanBtn = document.getElementById('scan');
@@ -27,94 +27,66 @@ scanBtn.addEventListener('click', async () => {
 
   setLoading(true, scanBtn, 'Scanning...');
   try {
-    const ab = await file.arrayBuffer();
-    const map = await unzipBuffer(ab);
-    lastZipMap = map;
+    samplesEl.innerHTML = '';
+    const opts = {
+      oldHub: oldHubInput.value || null,
+      newHub,
+      oldRepo: oldRepoInput.value || null,
+      newRepo,
+    };
+
+    const detectHubRegex = /https?:\/\/[\w@:\-\.\/%_\+\?=&;~#,'!\(\)\[\]]*?\/hub\//i;
+    const res = await scanZipBlob(file, { rewriteText, detectHubRegex, opts, sampleLimit: 10 });
+
+    lastZipMap = null; // no longer used; keep variable for minimal diff
 
     // Auto-detect if fields are empty
-    if (!oldHubInput.value || !oldRepoInput.value) {
-      const detected = await detectFromZipMap(map);
-      if (detected && !oldHubInput.value) oldHubInput.value = detected;
+    if (res.detectedHub && !oldHubInput.value) oldHubInput.value = res.detectedHub;
+
+    for (const p of res.samples) {
+      if (samplesEl.children.length >= 10) break;
+      const d = document.createElement('div');
+      d.className = 'sample-item';
+      d.innerHTML = `
+        <div><strong>Original:</strong> <pre>${escapeHtml(p.from)}</pre></div>
+        <div><strong>Rewritten:</strong> <pre>${escapeHtml(p.to)}</pre></div>
+      `;
+      samplesEl.appendChild(d);
     }
 
-    let filesScanned = 0;
-    let linksFound = 0;
-    let linksRewritten = 0;
-    samplesEl.innerHTML = '';
-
-    for (const [name, bytes] of map.entries()) {
-      filesScanned++;
-      // only attempt to decode allowlist extensions
-      if (!/\.(html|htm|xml|md|txt|json|csv)$/i.test(name)) continue;
-      let text;
-      try {
-        text = new TextDecoder('utf-8', {fatal: true}).decode(bytes);
-      } catch (e) {
-        // skip binary or non-utf8
-        continue;
-      }
-
-      const res = rewriteText(text, {oldHub: oldHubInput.value || null, newHub, oldRepo: oldRepoInput.value || null, newRepo});
-      if (res.patches && res.patches.length) {
-        linksFound += res.patches.length;
-        linksRewritten += res.patches.length;
-        // show up to 10 samples across files
-        for (const p of res.patches.slice(0, 10)) {
-          if (samplesEl.children.length >= 10) break;
-          const d = document.createElement('div');
-          d.className = 'sample-item';
-          d.innerHTML = `
-            <div><strong>Original:</strong> <pre>${escapeHtml(p.from)}</pre></div>
-            <div><strong>Rewritten:</strong> <pre>${escapeHtml(p.to)}</pre></div>
-          `;
-          samplesEl.appendChild(d);
-        }
-      }
-    }
-
-    filesScannedEl.textContent = filesScanned.toString();
-    linksFoundEl.textContent = linksFound.toString();
-    linksRewrittenEl.textContent = linksRewritten.toString();
-    rewriteBtn.disabled = linksRewritten === 0;
+    filesScannedEl.textContent = res.filesScanned.toString();
+    linksFoundEl.textContent = res.linksFound.toString();
+    linksRewrittenEl.textContent = res.linksRewritten.toString();
+    rewriteBtn.disabled = res.linksRewritten === 0;
     resetBtn.style.display = 'inline-block';
   } catch (err) {
     console.error(err);
-    alert('Error scanning file: ' + err.message);
+    let msg = (err && err.message) ? err.message : String(err);
+    if (/array buffer allocation failed|out of memory/i.test(msg)) {
+      msg += '\n\nThis is usually caused by loading the entire ZIP into RAM. This app now streams ZIPs, but extremely large exports can still exceed browser memory (especially during re-zipping). If possible, try a smaller export (remove large media) or run a Node-based rewrite on a machine with more memory.';
+    }
+    alert('Error scanning file: ' + msg);
   } finally {
     setLoading(false, scanBtn, 'Scan & Preview');
   }
 });
 
 rewriteBtn.addEventListener('click', async () => {
-  if (!lastZipMap) return alert('Scan first');
+  const file = fileInput.files && fileInput.files[0];
+  if (!file) return alert('Select a .imscc or .zip file first');
   const newHub = newHubInput.value.trim();
   const newRepo = newRepoInput.value.trim();
   if (!newHub || !newRepo) return alert('New Hub and New Repo are required');
 
   setLoading(true, rewriteBtn, 'Processing...');
   try {
-    const outMap = new Map(lastZipMap);
-    let modifiedCount = 0;
-
-    for (const [name, bytes] of lastZipMap.entries()) {
-      if (!/\.(html|htm|xml|md|txt|json|csv)$/i.test(name)) continue;
-
-      let text;
-      try {
-        text = new TextDecoder('utf-8', {fatal: true}).decode(bytes);
-      } catch (e) { continue; }
-
-      const res = rewriteText(text, {oldHub: oldHubInput.value || null, newHub, oldRepo: oldRepoInput.value || null, newRepo});
-      
-      if (res.changed) {
-        modifiedCount++;
-        outMap.set(name, new TextEncoder().encode(res.out));
-      }
-    }
-
-    // zip back
-    const zipU8 = await zipFiles(outMap);
-    const blob = new Blob([zipU8], {type: 'application/zip'});
+    const opts = {
+      oldHub: oldHubInput.value || null,
+      newHub,
+      oldRepo: oldRepoInput.value || null,
+      newRepo,
+    };
+    const blob = await rewriteZipBlob(file, { rewriteText, opts, level: 6 });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -125,7 +97,11 @@ rewriteBtn.addEventListener('click', async () => {
     URL.revokeObjectURL(url);
   } catch (err) {
     console.error(err);
-    alert('Error rewriting file: ' + err.message);
+    let msg = (err && err.message) ? err.message : String(err);
+    if (/array buffer allocation failed|out of memory/i.test(msg)) {
+      msg += '\n\nThis is usually a browser memory limit. Consider exporting without large media, or run the rewrite on a machine with more memory.';
+    }
+    alert('Error rewriting file: ' + msg);
   } finally {
     setLoading(false, rewriteBtn, 'Rewrite & Download');
   }
@@ -143,13 +119,39 @@ resetBtn.addEventListener('click', () => {
 });
 
 const loadingOverlay = document.getElementById('loading-overlay');
+const loadingText = loadingOverlay ? loadingOverlay.querySelector('p') : null;
+
+const MIN_LOADING_MS = 600;
+let loadingShownAt = 0;
+let loadingHideTimer = null;
 
 function setLoading(isLoading, btn, text) {
-  loadingOverlay.style.display = isLoading ? 'flex' : 'none';
+  if (loadingHideTimer) {
+    clearTimeout(loadingHideTimer);
+    loadingHideTimer = null;
+  }
+
+  if (isLoading) {
+    loadingShownAt = Date.now();
+    loadingOverlay.style.display = 'flex';
+  } else {
+    const elapsed = Date.now() - loadingShownAt;
+    const remaining = Math.max(0, MIN_LOADING_MS - elapsed);
+    if (remaining > 0) {
+      loadingHideTimer = setTimeout(() => {
+        loadingOverlay.style.display = 'none';
+        loadingHideTimer = null;
+      }, remaining);
+    } else {
+      loadingOverlay.style.display = 'none';
+    }
+  }
+
   if (btn && text) {
     btn.disabled = isLoading;
     btn.textContent = text;
   }
+  if (loadingText) loadingText.textContent = text || (isLoading ? 'Loading...' : '');
 }
 
 function escapeHtml(s){
