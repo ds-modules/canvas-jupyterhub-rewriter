@@ -47,9 +47,20 @@ export function rewriteText(text, opts) {
   const newRepoName = repoNameFromUrl(opts.newRepo) || null;
 
   // regex: find candidate URLs containing /hub/user-redirect/(git-sync|git-pull)
-  const urlRegex = /https?:\/\/[\w@:\-\.\/%_\+\?=&;~#,'!\(\)\[\]]*?\/hub\/user-redirect\/(?:git-sync|git-pull)[^\s"'<>]*/gi;
+  // do not match past ']' so CDATA terminators (]]>) are not consumed
+  const urlRegex = new RegExp(
+    'https?:\\/\\/[\\w@:\\.\\/%_\\+\\?=&;~#,\'!()\\[\\]]*?\\/hub\\/user-redirect\\/(?:git-sync|git-pull)[^\\s\"\'<>\\]]*',
+    'gi'
+  );
 
   out = out.replace(urlRegex, (orig) => {
+    // strip trailing delimiters that may wrap the URL (e.g. CDATA ]] or ]]>) so they are not percent-encoded
+    let suffix = '';
+    const suffixMatch = orig.match(/(\]\]>|\]\]|\]|\))$/);
+    if (suffixMatch) {
+      suffix = suffixMatch[0];
+      orig = orig.slice(0, -suffix.length);
+    }
     // preserve ampersand style
     const usesAmpEscaped = orig.includes('&amp;');
     const normalized = orig.replace(/&amp;/g, '&');
@@ -101,11 +112,11 @@ export function rewriteText(text, opts) {
     if (usesAmpEscaped) newUrl = newUrl.replace(/&/g, '&amp;');
 
     if (newUrl !== orig) {
-      patches.push({from: orig, to: newUrl, loc: -1});
+      patches.push({from: orig + suffix, to: newUrl + suffix, loc: -1});
       changed = true;
-      return newUrl;
+      return newUrl + suffix;
     }
-    return orig;
+    return orig + suffix;
   });
 
   return {out, changed, patches};
