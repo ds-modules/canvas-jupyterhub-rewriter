@@ -32,6 +32,24 @@ export function repoNameFromUrl(repoUrl) {
   return m && m[m.length - 1];
 }
 
+// nbgitpuller clones a repo into a folder named after the repo's final path
+// segment (with any trailing .git stripped). The urlpath points at that folder.
+export function folderNameFromRepo(repoUrl) {
+  const name = repoNameFromUrl(repoUrl);
+  return name ? name.replace(/\.git$/i, '') : name;
+}
+
+// Rewrite the clone-folder segment inside a nbgitpuller urlpath. The folder is
+// the segment immediately following a `tree` segment, so this handles the common
+// variants (`tree/<folder>/...`, `lab/tree/<folder>/...`) as well as a bare
+// `tree/<folder>` with no trailing path.
+export function rewriteUrlpathFolder(urlpath, oldFolder, newFolder) {
+  if (!urlpath || !oldFolder || !newFolder || oldFolder === newFolder) return urlpath;
+  const esc = oldFolder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp('(^|/)(tree/)' + esc + '(?=/|$)', 'g');
+  return urlpath.replace(re, '$1$2' + newFolder);
+}
+
 export function rewriteText(text, opts) {
   // opts: {oldHub?, newHub, oldRepo?, newRepo?}
   const patches = [];
@@ -43,8 +61,8 @@ export function rewriteText(text, opts) {
   }
 
   const newHubBase = ensureHubBase(opts.newHub);
-  const oldRepoName = opts.oldRepo ? repoNameFromUrl(opts.oldRepo) : null;
-  const newRepoName = repoNameFromUrl(opts.newRepo) || null;
+  const oldFolderFromOpts = opts.oldRepo ? folderNameFromRepo(opts.oldRepo) : null;
+  const newFolder = folderNameFromRepo(opts.newRepo) || null;
 
   // regex: find candidate URLs containing /hub/user-redirect/(git-sync|git-pull)
   // do not match past ']' so CDATA terminators (]]>) are not consumed
@@ -84,18 +102,21 @@ export function rewriteText(text, opts) {
 
     // Replace repo query param
     const params = new URLSearchParams(parsed.search);
+
+    // Derive the old clone-folder name from the repo URL embedded in this very
+    // link (always accurate, even when no oldRepo was provided in the UI), and
+    // fall back to the user-supplied oldRepo.
+    const oldFolder = folderNameFromRepo(params.get('repo')) || oldFolderFromOpts;
+
     if (params.has('repo')) {
       // replace repo param with newRepo
       params.set('repo', opts.newRepo);
     }
 
-    // urlpath conditional
+    // Rewrite the clone-folder segment in urlpath so the link still resolves
+    // after the repo is renamed (handles tree/, lab/tree/, etc.).
     if (params.has('urlpath')) {
-      const urlpath = params.get('urlpath');
-      if (oldRepoName && newRepoName && urlpath.startsWith('tree/' + oldRepoName + '/')) {
-        const replaced = urlpath.replace('tree/' + oldRepoName + '/', 'tree/' + newRepoName + '/');
-        params.set('urlpath', replaced);
-      }
+      params.set('urlpath', rewriteUrlpathFolder(params.get('urlpath'), oldFolder, newFolder));
     }
 
     // Construct new URL: newHubBase + remainderPath + params
